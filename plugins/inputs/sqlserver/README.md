@@ -544,8 +544,10 @@ ensure to check additional setup section in this documentation.
 - *SQLServerMemoryClerks*:         Memory clerk breakdown from `sys.dm_os_memory_clerks`,
                                    most clerks have been given a friendly name.
 - *SQLServerPerformanceCounters*:  A select list of performance counters from
-                                   `sys.dm_os_performance_counters`. Some of the
-                                   important metrics included:
+                                   `sys.dm_os_performance_counters`, plus
+                                   Resource Governor workload group metrics from
+                                   `sys.dm_resource_governor_workload_groups`.
+                                   Some of the important metrics included:
   - *Activity*:                    Transactions/sec/database, Batch requests/sec,
                                    blocked processes and more
   - *Availability Groups*:         Bytes sent to replica, Bytes received from
@@ -557,7 +559,14 @@ ensure to check additional setup section in this documentation.
   - *TempDB*:                      Free space, Version store usage, Active temp
                                    tables, temp table creation rate and more
   - *Resource Governor*:           CPU Usage, Requests/sec, Queued Requests, and
-                                   Blocked tasks per workload group and more
+                                   Blocked tasks per workload group (from
+                                   performance counters); Request Count, Queued
+                                   Request Count, CPU Limit Violation Count, CPU
+                                   Usage (time), Lock Wait Count, Lock Wait Time,
+                                   Reduced Memory Grant Count, and Preemptive CPU
+                                   Usage (time) (SQL 2016+) from workload group
+                                   DMVs
+
 - *SQLServerProperties*:           Number of databases in all possible states
                                    (online, offline, suspect, etc.), cpu count,
                                    total physical memory, available physical memory,
@@ -661,6 +670,15 @@ calculations:
 - SQLServer:Workload Group Stats\CPU usage %
 - SQLServer:Workload Group Stats\Queued requests
 - SQLServer:Workload Group Stats\Requests completed/sec
+- SQLServer:Workload Group Stats\Request Count
+- SQLServer:Workload Group Stats\Queued Request Count
+- SQLServer:Workload Group Stats\CPU Limit Violation Count
+- SQLServer:Workload Group Stats\CPU Usage (time)
+- SQLServer:Workload Group Stats\Lock Wait Count
+- SQLServer:Workload Group Stats\Lock Wait Time
+- SQLServer:Workload Group Stats\Reduced Memory Grant Count
+- SQLServer:Workload Group Stats\Preemptive CPU Usage (time)
+
 
 Version 2 queries have the following tags:
 
