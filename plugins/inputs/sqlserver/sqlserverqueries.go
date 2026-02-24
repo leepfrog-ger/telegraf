@@ -342,6 +342,8 @@ END
 DECLARE
 	 @SqlStatement AS nvarchar(max)
 	,@MajorMinorVersion AS int = CAST(PARSENAME(CAST(SERVERPROPERTY('ProductVersion') AS nvarchar),4) AS int)*100 + CAST(PARSENAME(CAST(SERVERPROPERTY('ProductVersion') AS nvarchar),3) AS int)
+	,@Columns AS nvarchar(MAX) = ''
+	,@PivotColumns AS nvarchar(MAX) = ''
 
 DECLARE @PCounters TABLE
 (
@@ -477,6 +479,44 @@ SELECT DISTINCT
 )
 
 INSERT INTO @PCounters SELECT * FROM PerfCounters;
+
+IF @MajorMinorVersion >= 1300 BEGIN
+	SET @Columns = N',rgwg.[total_cpu_usage_preemptive_ms] AS [Preemptive CPU Usage (time)]'
+	SET @PivotColumns = N',[Preemptive CPU Usage (time)]'
+END
+
+SET @SqlStatement = N'
+SELECT
+	 N''SQLServer:Workload Group Stats'' AS [object_name]
+	,vs.[counter] AS [counter_name]
+	,vs.[instance] AS [instance_name]
+	,CAST(vs.[value] AS BIGINT) AS [cntr_value]
+	,1 AS [cntr_type]
+FROM (
+	SELECT
+		 rgwg.[name] AS [instance]
+		,rgwg.[total_request_count] AS [Request Count]
+		,rgwg.[total_queued_request_count] AS [Queued Request Count]
+		,rgwg.[total_cpu_limit_violation_count] AS [CPU Limit Violation Count]
+		,rgwg.[total_cpu_usage_ms] AS [CPU Usage (time)]
+		,rgwg.[total_lock_wait_count] AS [Lock Wait Count]
+		,rgwg.[total_lock_wait_time_ms] AS [Lock Wait Time]
+		,rgwg.[total_reduced_memgrant_count] AS [Reduced Memory Grant Count]'
+	+ @Columns + N'
+	FROM sys.[dm_resource_governor_workload_groups] AS rgwg
+	INNER JOIN sys.[dm_resource_governor_resource_pools] AS rgrp
+		ON rgwg.[pool_id] = rgrp.[pool_id]
+) AS rg
+UNPIVOT (
+	[value] FOR [counter] IN (
+		[Request Count], [Queued Request Count], [CPU Limit Violation Count],
+		[CPU Usage (time)], [Lock Wait Count], [Lock Wait Time], [Reduced Memory Grant Count]'
+	+ @PivotColumns + N'
+	)
+) AS vs';
+
+INSERT INTO @PCounters ([object_name],[counter_name],[instance_name],[cntr_value],[cntr_type])
+EXEC sp_executesql @SqlStatement;
 
 SELECT
 	 'sqlserver_performance' AS [measurement]
