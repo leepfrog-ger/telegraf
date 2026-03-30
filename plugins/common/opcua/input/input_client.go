@@ -30,6 +30,7 @@ const (
 type DeadbandType string
 
 const (
+	None     DeadbandType = "None"
 	Absolute DeadbandType = "Absolute"
 	Percent  DeadbandType = "Percent"
 )
@@ -622,6 +623,12 @@ func (o *OpcUAInputClient) MetricForNode(nodeIdx int) telegraf.Metric {
 				fields = unpack(nmm.Tag.FieldName, typedValue)
 			case []bool:
 				fields = unpack(nmm.Tag.FieldName, typedValue)
+			case []time.Time:
+				strs := make([]string, len(typedValue))
+				for i, t := range typedValue {
+					strs[i] = t.Format(o.Config.TimestampFormat)
+				}
+				fields = unpack(nmm.Tag.FieldName, strs)
 			default:
 				o.Log.Errorf("could not unpack variant array of type: %T", typedValue)
 			}
@@ -670,6 +677,7 @@ func unpack[Slice ~[]E, E any](prefix string, value Slice) map[string]interface{
 func (o *OpcUAInputClient) MetricForEvent(nodeIdx int, event *ua.EventFieldList) telegraf.Metric {
 	node := o.EventNodeMetricMapping[nodeIdx]
 	fields := make(map[string]interface{}, len(event.EventFields))
+	var sourceTime, serverTime time.Time
 	for i, field := range event.EventFields {
 		name := node.Fields[i]
 		value := field.Value()
@@ -683,11 +691,22 @@ func (o *OpcUAInputClient) MetricForEvent(nodeIdx int, event *ua.EventFieldList)
 		case *ua.LocalizedText:
 			fields[name] = v.Text
 		case time.Time:
+			if name == "Time" {
+				sourceTime = v
+			} else if name == "ReceiveTime" {
+				serverTime = v
+			}
 			fields[name] = v.Format(time.RFC3339)
 		default:
 			fields[name] = v
 		}
 	}
+
+	if len(fields) == 0 {
+		o.Log.Warn("Event has no fields with values, skipping")
+		return nil
+	}
+
 	tags := map[string]string{
 		"node_id": node.NodeID.String(),
 		"source":  o.Config.Endpoint,
@@ -695,10 +714,11 @@ func (o *OpcUAInputClient) MetricForEvent(nodeIdx int, event *ua.EventFieldList)
 	var t time.Time
 	switch o.Config.Timestamp {
 	case TimestampSourceServer:
-		t = o.LastReceivedData[nodeIdx].ServerTime
+		t = serverTime
 	case TimestampSourceSource:
-		t = o.LastReceivedData[nodeIdx].SourceTime
-	default:
+		t = sourceTime
+	}
+	if t.IsZero() {
 		t = time.Now()
 	}
 
@@ -732,13 +752,48 @@ func (node *EventNodeMetricMapping) createSelectClauses() ([]*ua.SimpleAttribute
 		return nil, err
 	}
 	for i, name := range node.Fields {
+		browsePath, err := parseBrowsePath(name)
+		if err != nil {
+			return nil, fmt.Errorf("parsing field %q failed: %w", name, err)
+		}
 		selects[i] = &ua.SimpleAttributeOperand{
 			TypeDefinitionID: typeDefinition,
-			BrowsePath:       []*ua.QualifiedName{{NamespaceIndex: 0, Name: name}},
+			BrowsePath:       browsePath,
 			AttributeID:      ua.AttributeIDValue,
 		}
 	}
 	return selects, nil
+}
+
+// parseBrowsePath parses a field name into a browse path of qualified names.
+// It supports namespace-qualified segments (e.g. "2:TEXT01") and multi-segment
+// paths separated by "/" (e.g. "AckedState/Id" or "2:AckedState/0:Id").
+func parseBrowsePath(field string) ([]*ua.QualifiedName, error) {
+	segments := strings.Split(field, "/")
+	path := make([]*ua.QualifiedName, 0, len(segments))
+	for _, seg := range segments {
+		if seg == "" {
+			return nil, fmt.Errorf("empty segment in browse path %q", field)
+		}
+		ns, name := parseQualifiedName(seg)
+		path = append(path, &ua.QualifiedName{NamespaceIndex: ns, Name: name})
+	}
+	return path, nil
+}
+
+// parseQualifiedName parses a single segment like "2:TEXT01" into a namespace
+// index and name. If no namespace prefix is present, namespace 0 is used.
+func parseQualifiedName(segment string) (uint16, string) {
+	prefix, name, found := strings.Cut(segment, ":")
+	if !found {
+		return 0, segment
+	}
+	ns, err := strconv.ParseUint(prefix, 10, 16)
+	if err != nil {
+		// Not a valid namespace prefix, treat the whole segment as the name
+		return 0, segment
+	}
+	return uint16(ns), name
 }
 
 func (node *EventNodeMetricMapping) createWhereClauses() (*ua.ContentFilter, error) {
@@ -747,7 +802,7 @@ func (node *EventNodeMetricMapping) createWhereClauses() (*ua.ContentFilter, err
 			Elements: make([]*ua.ContentFilterElement, 0),
 		}, nil
 	}
-	operands := make([]*ua.ExtensionObject, 0)
+	operands := make([]*ua.ExtensionObject, 0, len(node.SourceNames))
 	for _, sourceName := range node.SourceNames {
 		literalOperand := &ua.ExtensionObject{
 			EncodingMask: 1,

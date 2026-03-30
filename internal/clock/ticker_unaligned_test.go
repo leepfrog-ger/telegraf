@@ -15,16 +15,10 @@ func TestUnalignedTicker(t *testing.T) {
 
 	clk := clock.NewMock()
 	clk.Add(1 * time.Second)
-	start := clk.Now()
-	end := start.Add(60 * time.Second)
 
-	ticker := &unaligned{
-		clk:      clk,
-		interval: interval,
-		jitter:   jitter,
-		offset:   offset,
-	}
-	ticker.start()
+	startup := make(chan bool, 1)
+
+	ticker := NewTicker(interval, jitter, offset, WithClock(clk), WithStartupNotification(startup))
 	defer ticker.Stop()
 
 	expected := []time.Time{
@@ -39,19 +33,19 @@ func TestUnalignedTicker(t *testing.T) {
 
 	actual := make([]time.Time, 0, len(expected))
 
-	// Wait for the first tick to avoid race conditions between updating the
-	// time and starting the timer.
-	tm := <-ticker.Elapsed()
-	actual = append(actual, tm.UTC())
+	// Wait for the ticker to startup
+	<-startup
 
-	// Advance the clock and collect all ticks on the way
-	for !clk.Now().After(end) {
-		select {
-		case tm := <-ticker.Elapsed():
-			actual = append(actual, tm.UTC())
-		default:
-			clk.Add(1 * time.Second)
-		}
+	// The first tick fires immediately inside the Timer() constructor
+	// (Timer(0) with deadline == now), so no clock advance is needed.
+	// Blocking on each read ensures the ticker goroutine has called
+	// timer.Reset() before the next clock advance, preventing the
+	// race between clk.Add() and timer.Reset() that causes flaky
+	// deadline shifts.
+	actual = append(actual, (<-ticker.C).UTC())
+	for i := 1; i < len(expected); i++ {
+		clk.Add(interval)
+		actual = append(actual, (<-ticker.C).UTC())
 	}
 	require.Equal(t, expected, actual)
 }
@@ -67,13 +61,7 @@ func TestUnalignedTickerJitterBehavior(t *testing.T) {
 	clk := clock.NewMock()
 	start := clk.Now()
 
-	ticker := &unaligned{
-		clk:      clk,
-		interval: interval,
-		jitter:   jitter,
-		offset:   offset,
-	}
-	ticker.start()
+	ticker := NewTicker(interval, jitter, offset, WithClock(clk))
 	defer ticker.Stop()
 
 	// Collect 60 ticks
@@ -82,8 +70,8 @@ func TestUnalignedTickerJitterBehavior(t *testing.T) {
 
 	for len(triggers) < numTicks {
 		select {
-		case tm := <-ticker.Elapsed():
-			triggers = append(triggers, tm)
+		case ts := <-ticker.C:
+			triggers = append(triggers, ts)
 		default:
 			clk.Add(1 * time.Second)
 		}
@@ -126,15 +114,10 @@ func TestUnalignedTickerDistribution(t *testing.T) {
 
 	clk := clock.NewMock()
 
-	ticker := &unaligned{
-		clk:      clk,
-		interval: interval,
-		jitter:   jitter,
-		offset:   offset,
-	}
-	ticker.start()
+	ticker := NewTicker(interval, jitter, offset, WithClock(clk))
 	defer ticker.Stop()
-	dist := simulatedDist(ticker, clk)
+
+	dist := simulatedTickerDist(ticker, clk)
 	dist.print()
 	require.Less(t, 350, dist.count)
 	require.True(t, 9 < dist.mean() && dist.mean() < 11)
@@ -151,15 +134,10 @@ func TestUnalignedTickerDistributionWithOffset(t *testing.T) {
 
 	clk := clock.NewMock()
 
-	ticker := &unaligned{
-		clk:      clk,
-		interval: interval,
-		jitter:   jitter,
-		offset:   offset,
-	}
-	ticker.start()
+	ticker := NewTicker(interval, jitter, offset, WithClock(clk))
 	defer ticker.Stop()
-	dist := simulatedDist(ticker, clk)
+
+	dist := simulatedTickerDist(ticker, clk)
 	dist.print()
 	require.Less(t, 350, dist.count)
 	require.True(t, 9 < dist.mean() && dist.mean() < 11)

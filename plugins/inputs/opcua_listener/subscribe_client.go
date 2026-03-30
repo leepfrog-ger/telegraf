@@ -42,12 +42,13 @@ func checkDataChangeFilterParameters(params *input.DataChangeFilter) error {
 		params.Trigger != input.StatusValue &&
 		params.Trigger != input.StatusValueTimestamp:
 		return fmt.Errorf("trigger '%s' not supported", params.Trigger)
-	case params.DeadbandType != input.Absolute &&
+	case params.DeadbandType != input.None &&
+		params.DeadbandType != input.Absolute &&
 		params.DeadbandType != input.Percent:
 		return fmt.Errorf("deadband_type '%s' not supported", params.DeadbandType)
-	case params.DeadbandValue == nil:
+	case params.DeadbandType != input.None && params.DeadbandValue == nil:
 		return errors.New("deadband_value was not set")
-	case *params.DeadbandValue < 0:
+	case params.DeadbandValue != nil && *params.DeadbandValue < 0:
 		return errors.New("negative deadband_value not supported")
 	default:
 		return nil
@@ -70,11 +71,17 @@ func assignConfigValuesToRequest(req *ua.MonitoredItemCreateRequest, monParams *
 			return fmt.Errorf(err.Error()+", node '%s'", req.ItemToMonitor.NodeID)
 		}
 
+		var deadbandValue float64
+
+		if monParams.DataChangeFilter.DeadbandValue != nil {
+			deadbandValue = *monParams.DataChangeFilter.DeadbandValue
+		}
+
 		req.RequestedParameters.Filter = ua.NewExtensionObject(
 			&ua.DataChangeFilter{
 				Trigger:       ua.DataChangeTriggerFromString(string(monParams.DataChangeFilter.Trigger)),
 				DeadbandType:  uint32(ua.DeadbandTypeFromString(string(monParams.DataChangeFilter.DeadbandType))),
-				DeadbandValue: *monParams.DataChangeFilter.DeadbandValue,
+				DeadbandValue: deadbandValue,
 			},
 		)
 	}
@@ -276,7 +283,9 @@ func (o *subscribeClient) processReceivedNotifications() {
 				// It is assumed the events are ordered chronologically
 				for _, event := range notif.Events {
 					i := int(event.ClientHandle)
-					o.metrics <- o.MetricForEvent(i, event)
+					if m := o.MetricForEvent(i, event); m != nil {
+						o.metrics <- m
+					}
 				}
 			default:
 				o.Log.Warnf("Received notification has unexpected type %s", reflect.TypeOf(res.Value))

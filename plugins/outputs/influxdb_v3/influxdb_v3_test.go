@@ -33,6 +33,24 @@ func TestSampleConfig(t *testing.T) {
 	require.NotEmpty(t, plugin.SampleConfig())
 }
 
+func TestTimeoutTOMLParsing(t *testing.T) {
+	c := config.NewConfig()
+	cfg := []byte(`
+[[outputs.influxdb_v3]]
+  urls = ["http://localhost:8181"]
+  database = "test"
+  timeout = "120s"
+  response_timeout = "33s"
+`)
+	require.NoError(t, c.LoadConfigData(cfg, config.EmptySourcePath))
+	require.Len(t, c.Outputs, 1)
+
+	plugin, ok := c.Outputs[0].Output.(*InfluxDB)
+	require.True(t, ok)
+	require.Equal(t, config.Duration(120*time.Second), plugin.HTTPClientConfig.Timeout)
+	require.Equal(t, config.Duration(33*time.Second), plugin.HTTPClientConfig.ResponseHeaderTimeout)
+}
+
 func TestPluginRegistered(t *testing.T) {
 	require.Contains(t, outputs.Outputs, "influxdb_v3")
 }
@@ -187,7 +205,7 @@ func TestWrite(t *testing.T) {
 
 	// Test writing
 	metrics := []telegraf.Metric{
-		testutil.MustMetric(
+		metric.New(
 			"cpu",
 			map[string]string{
 				"database": "foobar",
@@ -236,7 +254,7 @@ func TestWriteDefaultSync(t *testing.T) {
 
 	// Test writing
 	metrics := []telegraf.Metric{
-		testutil.MustMetric(
+		metric.New(
 			"cpu",
 			map[string]string{
 				"database": "foobar",
@@ -286,7 +304,7 @@ func TestWriteExplicitSync(t *testing.T) {
 
 	// Test writing
 	metrics := []telegraf.Metric{
-		testutil.MustMetric(
+		metric.New(
 			"cpu",
 			map[string]string{
 				"database": "foobar",
@@ -348,7 +366,7 @@ func TestWriteNotConvertUint(t *testing.T) {
 
 	// Test writing
 	metrics := []telegraf.Metric{
-		testutil.MustMetric(
+		metric.New(
 			"cpu",
 			map[string]string{},
 			map[string]interface{}{
@@ -409,7 +427,7 @@ func TestWriteConvertUint(t *testing.T) {
 
 	// Test writing
 	metrics := []telegraf.Metric{
-		testutil.MustMetric(
+		metric.New(
 			"cpu",
 			map[string]string{},
 			map[string]interface{}{
@@ -457,7 +475,7 @@ func TestWriteExplicitNoSync(t *testing.T) {
 
 	// Test writing
 	metrics := []telegraf.Metric{
-		testutil.MustMetric(
+		metric.New(
 			"cpu",
 			map[string]string{
 				"database": "foobar",
@@ -527,7 +545,7 @@ func TestWriteDatabaseTagWorksOnRetry(t *testing.T) {
 
 	// Send the metrics which should be succeed if sent twice
 	metrics := []telegraf.Metric{
-		testutil.MustMetric(
+		metric.New(
 			"cpu",
 			map[string]string{
 				"database": "foo",

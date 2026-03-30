@@ -19,6 +19,7 @@ import (
 	"github.com/influxdata/telegraf"
 	"github.com/influxdata/telegraf/config"
 	"github.com/influxdata/telegraf/internal/choice"
+	"github.com/influxdata/telegraf/metric"
 	"github.com/influxdata/telegraf/models"
 	"github.com/influxdata/telegraf/testutil"
 )
@@ -592,9 +593,9 @@ func TestContainerLabels(t *testing.T) {
 
 			// Grab tags from a container metric
 			var actual map[string]string
-			for _, metric := range acc.Metrics {
-				if metric.Measurement == "docker_container_cpu" {
-					actual = metric.Tags
+			for _, mt := range acc.Metrics {
+				if mt.Measurement == "docker_container_cpu" {
+					actual = mt.Tags
 				}
 			}
 
@@ -707,15 +708,15 @@ func TestContainerNames(t *testing.T) {
 			require.NoError(t, err)
 
 			// Set of expected names
-			var expected = make(map[string]bool)
+			expected := make(map[string]bool)
 			for _, v := range tt.expected {
 				expected[v] = true
 			}
 
 			// Set of actual names
-			var actual = make(map[string]bool)
-			for _, metric := range acc.Metrics {
-				if name, ok := metric.Tags["container_name"]; ok {
+			actual := make(map[string]bool)
+			for _, mt := range acc.Metrics {
+				if name, ok := mt.Tags["container_name"]; ok {
 					actual[name] = true
 				}
 			}
@@ -1186,7 +1187,7 @@ func TestContainerStateFilter(t *testing.T) {
 			exclude: []string{"*"},
 		},
 		{
-			name:     "exclude all",
+			name:     "exclude exited",
 			include:  []string{"*"},
 			exclude:  []string{"exited"},
 			expected: []string{"created", "restarting", "running", "removing", "paused", "dead"},
@@ -1202,7 +1203,7 @@ func TestContainerStateFilter(t *testing.T) {
 			newClientFunc := func(string, *tls.Config) (dockerClient, error) {
 				client := baseClient
 				client.ContainerListF = func(container.ListOptions) ([]container.Summary, error) {
-					var containers []container.Summary
+					containers := make([]container.Summary, 0, len(containerStates))
 					for _, v := range containerStates {
 						containers = append(containers, container.Summary{
 							Names: []string{v},
@@ -1227,15 +1228,15 @@ func TestContainerStateFilter(t *testing.T) {
 			require.NoError(t, err)
 
 			// Set of expected names
-			var expected = make(map[string]bool)
+			expected := make(map[string]bool)
 			for _, v := range tt.expected {
 				expected[v] = true
 			}
 
 			// Set of actual names
-			var actual = make(map[string]bool)
-			for _, metric := range acc.Metrics {
-				if name, ok := metric.Tags["container_name"]; ok {
+			actual := make(map[string]bool)
+			for _, mt := range acc.Metrics {
+				if name, ok := mt.Tags["container_name"]; ok {
 					actual[name] = true
 				}
 			}
@@ -1243,6 +1244,81 @@ func TestContainerStateFilter(t *testing.T) {
 			require.Equal(t, expected, actual)
 		})
 	}
+}
+
+func TestNonRunningContainerEmitsStatusMetrics(t *testing.T) {
+	newClientFunc := func(string, *tls.Config) (dockerClient, error) {
+		client := baseClient
+		client.ContainerListF = func(container.ListOptions) ([]container.Summary, error) {
+			return []container.Summary{
+				{
+					ID:    "abc123",
+					Names: []string{"/stopped-container"},
+					State: "exited",
+				},
+			}, nil
+		}
+		client.ContainerStatsF = func(string) (container.StatsResponseReader, error) {
+			return container.StatsResponseReader{
+				Body: io.NopCloser(strings.NewReader("")),
+			}, nil
+		}
+		client.ContainerInspectF = func() (container.InspectResponse, error) {
+			return container.InspectResponse{
+				Config: &container.Config{},
+				ContainerJSONBase: &container.ContainerJSONBase{
+					State: &container.State{
+						Status:     "exited",
+						ExitCode:   137,
+						StartedAt:  "2024-01-01T00:00:00Z",
+						FinishedAt: "2024-01-01T01:00:00Z",
+					},
+				},
+			}, nil
+		}
+		return &client, nil
+	}
+
+	d := Docker{
+		Log:                   testutil.Logger{},
+		newClient:             newClientFunc,
+		ContainerStateInclude: []string{"exited"},
+	}
+
+	var acc testutil.Accumulator
+	require.NoError(t, d.Init())
+	require.NoError(t, d.Start(&acc))
+	require.NoError(t, d.Gather(&acc))
+
+	expected := []telegraf.Metric{
+		metric.New(
+			"docker_container_status",
+			map[string]string{
+				"container_name":    "stopped-container",
+				"container_image":   "",
+				"container_version": "unknown",
+				"engine_host":       "absol",
+				"server_version":    "17.09.0-ce",
+				"container_status":  "exited",
+			},
+			map[string]interface{}{
+				"oomkilled":     false,
+				"pid":           0,
+				"exitcode":      137,
+				"restart_count": 0,
+				"container_id":  "abc123",
+				"started_at":    time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC).UnixNano(),
+				"finished_at":   time.Date(2024, 1, 1, 1, 0, 0, 0, time.UTC).UnixNano(),
+				"uptime_ns":     int64(time.Hour),
+			},
+			time.Time{},
+		),
+	}
+
+	actual := filterMetrics(acc.GetTelegrafMetrics(), func(m telegraf.Metric) bool {
+		return strings.HasPrefix(m.Name(), "docker_container_")
+	})
+	testutil.RequireMetricsEqual(t, expected, actual, testutil.IgnoreTime())
 }
 
 func TestContainerName(t *testing.T) {
@@ -1256,11 +1332,12 @@ func TestContainerName(t *testing.T) {
 			clientFunc: func(string, *tls.Config) (dockerClient, error) {
 				client := baseClient
 				client.ContainerListF = func(container.ListOptions) ([]container.Summary, error) {
-					var containers []container.Summary
-					containers = append(containers, container.Summary{
-						Names: []string{"/logspout/foo"},
-						State: "running",
-					})
+					containers := []container.Summary{
+						{
+							Names: []string{"/logspout/foo"},
+							State: "running",
+						},
+					}
 					return containers, nil
 				}
 				client.ContainerStatsF = func(string) (container.StatsResponseReader, error) {
@@ -1277,11 +1354,12 @@ func TestContainerName(t *testing.T) {
 			clientFunc: func(string, *tls.Config) (dockerClient, error) {
 				client := baseClient
 				client.ContainerListF = func(container.ListOptions) ([]container.Summary, error) {
-					var containers []container.Summary
-					containers = append(containers, container.Summary{
-						Names: []string{"/logspout"},
-						State: "running",
-					})
+					containers := []container.Summary{
+						{
+							Names: []string{"/logspout"},
+							State: "running",
+						},
+					}
 					return containers, nil
 				}
 				client.ContainerStatsF = func(string) (container.StatsResponseReader, error) {
@@ -1306,10 +1384,10 @@ func TestContainerName(t *testing.T) {
 			err := d.Gather(&acc)
 			require.NoError(t, err)
 
-			for _, metric := range acc.Metrics {
+			for _, mt := range acc.Metrics {
 				// This tag is set on all container measurements
-				if metric.Measurement == "docker_container_mem" {
-					require.Equal(t, tt.expected, metric.Tags["container_name"])
+				if mt.Measurement == "docker_container_mem" {
+					require.Equal(t, tt.expected, mt.Tags["container_name"])
 				}
 			}
 		})
